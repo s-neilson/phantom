@@ -93,6 +93,7 @@ subroutine do_analysis(dumpfile,num,xyzh,vxyzu,particlemass,npart,time,iunit)
             ' 7) Simulation units and particle properties', &
             ' 8) Output .divv', &
             ' 9) EoS testing', &
+            '10) Planet destruction', &
             '11) Profile of newly unbound particles', &
             '12) Sink properties', &
             '13) MESA EoS compute total entropy and other average td quantities', &
@@ -154,6 +155,8 @@ subroutine do_analysis(dumpfile,num,xyzh,vxyzu,particlemass,npart,time,iunit)
     call output_divv_files(time,dumpfile,npart,particlemass,xyzh,vxyzu)
  case(9) !EoS testing
     call eos_surfaces
+ case(10) !Planet destruction
+    call planet_destruction(time,npart,particlemass,xyzh,vxyzu)
  case(11) !New unbound particle profiles in time
     call unbound_profiles(time,num,npart,particlemass,xyzh,vxyzu)
  case(19) ! Rotation profile
@@ -3333,24 +3336,26 @@ subroutine planet_destruction(time,npart,particlemass,xyzh,vxyzu)
  real, allocatable                :: planetDestruction(:)
  integer                          :: ncols,i,j
  real, allocatable, save          :: time_old
- real, allocatable, save          :: particleRho(:)
+ real, allocatable                :: particleRho(:,:)
  character(len=50)                :: planetRadiusPromptString
  real, allocatable, save          :: planetRadii(:) !In units of Rsun
 
  real, dimension(3)               :: currentGasVel, currentVelContrast
- real                             :: currentRho(1) !Is a one element array because sphInterpolation returns a 1 dimensional array.
+ real                             :: currentRho(1) !Is a one element array because sphInterpolation returns a 1 dimensional array for density.
+ real                             :: currentPlanetRho,currentPlanetEscapeVelocity
  real                             :: currentRhoScaled,currentVelContrastScaled,currentPlanetRhoScaled
  real                             :: currentPlanetMassScaled,currentPlanetRadiusScaled
  real, allocatable, save          :: currentKhAblatedMass(:)
 
- ncols=5
+ ncols=6
  allocate(columns(ncols))
  allocate(planetDestruction(ncols))
  columns=(/"      rhoGas", &
            "  kh_rhoCrit", &
            "     kh_lmax", &
            "     kh_mdot", &
-           " kh_ablatedM" /)
+           " kh_ablatedM", & 
+           " disruptionF" /)
 
  !Kelvin-Helmholtz instability planet destruction as described in "On the survival of brown dwarfs
  !and planets by their giant host star" (https://arxiv.org/abs/1210.0879). Description of columns:
@@ -3360,7 +3365,10 @@ subroutine planet_destruction(time,npart,particlemass,xyzh,vxyzu)
  !kh_mdot: paper equation 7. In units of Jupiter mass/year.
  !kh_ablatedM: kh_mdot integrated over time. In units of Jupiter masses.
 
- currentRho = 0.
+ !disruptionF is the disruption factor as described in "Disruption of a planet spiralling into 
+ !its host star" (https://arxiv.org/abs/1808.00467).
+
+ allocate(particleRho(1,npart)) 
  do i=1,nptmass
     if (i==1) cycle !The first sink is assumed to be the core.
 
@@ -3373,22 +3381,27 @@ subroutine planet_destruction(time,npart,particlemass,xyzh,vxyzu)
        enddo
 
        allocate(time_old)
-       allocate(particleRho(npart))
        allocate(currentKhAblatedMass(nptmass))
 
        time_old=0.0
-       particleRho=getParticleRho(xyzh(4,:),particlemass)
        currentKhAblatedMass=0.0
     endif
 
+    !Makes a 2d array of the SPH particle densities, with the 1st dimension having only one element. This is
+    !so it can be passed into the toInterpolate argument of sphInterpolation. 
+    do j=1,npart
+       particleRho(1,j)=rhoh(xyzh(4,j),particlemass)
+    enddo
 
-    currentRho=sphInterpolation(npart,particlemass,particleRho,xyzh,xyzmh_ptmass(1:3,i),reshape(particleRho,(/1,npart/)))
-    currentGasVel=sphInterpolation(npart,particlemass,particleRho,xyzh,xyzmh_ptmass(1:3,i),vxyzu(1:3,:))
+    currentRho=sphInterpolation(npart,xyzh,particlemass,particleRho,xyzmh_ptmass(1:3,i),particleRho)
+    currentPlanetRho=xyzmh_ptmass(4,i)/((4.0/3.0)*pi*(planetRadii(i)**3.0))
+    currentGasVel=sphInterpolation(npart,xyzh,particlemass,particleRho,xyzmh_ptmass(1:3,i),vxyzu(1:3,:))
     currentVelContrast=vxyz_ptmass(1:3,i)-currentGasVel
+    currentPlanetEscapeVelocity=sqrt((2.0*xyzmh_ptmass(4,i))/planetRadii(i))
 
     currentPlanetRadiusScaled=planetRadii(i)/0.1 !In units of 0.1 Rsun.
     currentPlanetMassScaled=xyzmh_ptmass(4,i)*104.74 !In units of 10 jupiter masses.
-    currentPlanetRhoScaled=(xyzmh_ptmass(4,i)/((4.0/3.0)*pi*(planetRadii(i)**3.0)))*0.44 !In units of 13.34 g/cm^3
+    currentPlanetRhoScaled=currentPlanetRho*0.44 !In units of 13.34 g/cm^3
     currentRhoScaled=currentRho(1)*59000.0 !In units of 10^-4 g/cm^3.
     currentVelContrastScaled=distance(currentVelContrast)*4.37 !In units of 100 km/s.
 
@@ -3402,6 +3415,8 @@ subroutine planet_destruction(time,npart,particlemass,xyzh,vxyzu)
 
     currentKhAblatedMass(i)=currentKhAblatedMass(i)+((time-time_old)*planetDestruction(4)*0.0000505)
     planetDestruction(5)=currentKhAblatedMass(i)
+
+    planetDestruction(6)=(currentRho(1)*(distance(currentVelContrast)**2.0))/(currentPlanetRho*(currentPlanetEscapeVelocity**2.0))
 
 
     write(filename, "(A17,I0)") "sink_destruction_",i
@@ -4262,52 +4277,38 @@ real function separation(a,b)
  separation = distance(a - b)
 end function separation
 
-!Creates an array of SPH particle densities for each value of h.
-elemental real function getParticleRho(h,particlemass)
- real, intent(in) :: h,particlemass
- getParticleRho=rhoh(h,particlemass)
-end function getParticleRho
 
 !Performs SPH interpolation on the SPH particle property toInterpolate at the location interpolateXyz.
 !The smoothing length used is the smoothing length of the closest SPH particle to interpolateXyz.
-function sphInterpolation(npart,particlemass,particleRho,particleXyzh,interpolateXyz,toInterpolate) result(interpolatedData)
- use kernel, only:wkern
+function sphInterpolation(npart,xyzh,particlemass,particleRho,interpolateXyz,toInterpolate) result(interpolatedData)
+ use kernel, only:cnormk,wkern
  integer, intent(in) :: npart
  real, intent(in)    :: particlemass
- real, intent(in)    :: particleRho(npart)
- real, intent(in)    :: particleXyzh(4,npart)
+ real, intent(in)    :: particleRho(1,npart)
+ real, intent(in)    :: xyzh(4,npart)
  real, intent(in)    :: interpolateXyz(3)
  real, intent(in)    :: toInterpolate(:,:)
- real                :: interpolatedData(size(toInterpolate,1))
+ real, allocatable   :: interpolatedData(:)
 
- integer              :: i,j
- integer, allocatable :: iorder(:)
+ integer              :: i
  real                 :: currentR,currentQ,currentQ2
- real                 :: nearestSphH
+ real                 :: currentH
  real                 :: currentParticleRho,currentSphSummandFactor
 
+
+ allocate(interpolatedData(size(toInterpolate,1)))
  interpolatedData=0.0
- allocate(iorder(npart))
- call set_r2func_origin(interpolateXyz(1),interpolateXyz(2),interpolateXyz(3))
- call indexxfunc(npart,r2func_origin,particleXyzh,iorder) !Gets the order of SPH particles from the interpolation point.
- nearestSphH=particleXyzh(4,iorder(1)) !The smoothing length of the nearest SPH particle to the ineterpolation point.
 
  do i=1,npart
-    j=iorder(i)
-
-    currentR=separation(interpolateXyz,particleXyzh(1:3,j))
-    currentQ=currentR/nearestSphH !currentR is scaled in units of nearestSphH
+    currentH=xyzh(4,i)
+    currentR=separation(interpolateXyz,xyzh(1:3,i))
+    currentQ=currentR/currentH !currentR is scaled in units of currentH
     currentQ2=currentQ**2.0
 
-    !All SPH particles beyond 2 smoothing lengths are ignored.
-    if (currentQ>2) then
-       exit
-    endif
-
     !SPH interpolation is done below.
-    currentParticleRho=particleRho(j)
-    currentSphSummandFactor=(particlemass/currentParticleRho)*((1.0/((nearestSphH**3.0)*pi))*wkern(currentQ2,currentQ))
-    interpolatedData=interpolatedData+(currentSphSummandFactor*toInterpolate(:,j))
+    currentParticleRho=particleRho(1,i)
+    currentSphSummandFactor=(particlemass/currentParticleRho)*(cnormk/(currentH**3.0))*wkern(currentQ2,currentQ)
+    interpolatedData=interpolatedData+(currentSphSummandFactor*toInterpolate(:,i))
  enddo
 end function sphInterpolation
 
