@@ -71,7 +71,8 @@ subroutine modify_dump(npart,npartoftype,massoftype,xyzh,vxyzu)
     call fatal('moddump_binary','Number of sink particles > 3')
  elseif (nptmass == 3) then
     print*, 'Three sink particles are present. Choose option below:'
-    print "(1(/,a))",'1) Remove a sink from the simulation'
+    print "(2(/,a))",'1) Remove a sink from the simulation', &
+                     "2) Merge a sink's mass and momentum into another"
     call prompt('Select option above : ',ioption)
     select case(ioption)
 
@@ -81,15 +82,11 @@ subroutine modify_dump(npart,npartoftype,massoftype,xyzh,vxyzu)
                                               ' and radial position = ',sqrt(dot_product(xyzmh_ptmass(1:3,i),xyzmh_ptmass(1:3,i)))
        enddo
        call prompt('Which sink would you like to remove : ',iremove)
-       if (iremove == 3) then
-          xyzmh_ptmass(:,iremove) = 0.
-          vxyz_ptmass(:,iremove) = 0.
-          nptmass = 2
-       elseif (iremove == 2) then
-          xyzmh_ptmass(:,2) = xyzmh_ptmass(:,3)
-          vxyz_ptmass(:,2) = vxyz_ptmass(:,3)
-          nptmass = 2
-       endif
+       call removeSink(iremove,xyzmh_ptmass,vxyz_ptmass)
+
+
+    case(2)
+       call mergeSinks(xyzmh_ptmass,vxyz_ptmass)       
     end select
 
  elseif (nptmass == 2) then
@@ -745,4 +742,88 @@ subroutine set_triple(mprimary,msecondary,mtertiary,semimajoraxis12,semimajoraxi
 
 end subroutine set_triple
 
+
+!Removes a sink particle and shuffles the other sink particles to fill the gaps in the xyzmh and vxyz _ptmass arrays.
+subroutine removeSink(removeSinkIndex,xyzmh_ptmass,vxyz_ptmass)
+ use part,           only:nptmass
+ integer, intent(in) :: removeSinkIndex
+ real, intent(inout) :: xyzmh_ptmass(:,:),vxyz_ptmass(:,:)
+
+ integer             :: i
+
+
+ 
+ do i=removeSinkIndex,nptmass   
+  if(i/=nptmass) then
+   xyzmh_ptmass(:,i)=xyzmh_ptmass(:,i+1)
+   vxyz_ptmass(:,i)=vxyz_ptmass(:,i+1)
+
+   if(i==removeSinkIndex) then
+    write(*,'(a,I2)') 'Removed original sink #',removeSinkIndex
+   endif
+
+   write(*,'(a,I2,a,I2)') 'Original sink #',i+1,' is now in xyzmh and vxyz _ptmass array position ',i
+  else !The last sink in the xyzmh and vxyz _ptmass arrays has been reached.
+   xyzmh_ptmass(:,i)=0.0
+   vxyz_ptmass(:,i)=0.0
+   nptmass=nptmass-1 !The number of sink particles is decremented.
+  endif
+ enddo
+
+
+end subroutine removeSink
+
+
+!Merges the mass and momentum of sinkFrom into sinkTo, and sets the mass of sinkFrom to near zero.
+subroutine mergeSinks(xyzmh_ptmass,vxyz_ptmass)
+ use part,           only:nptmass
+ use prompting,      only:prompt
+ real, intent(inout) :: xyzmh_ptmass(:,:),vxyz_ptmass(:,:)
+
+ integer             :: sinkFromIndex=2,sinkToIndex=1
+ real                :: mFrom,mTo,mCombined
+ real,dimension(3)   :: vFrom,vTo,vCombined
+ logical             :: removeSinkFrom=.false.
+
+
+ print *,""
+ call prompt('Choose the sink to be merged into another',sinkFromIndex,1,nptmass)
+ call prompt('Choose the sink to merge into',sinkToIndex,1,nptmass)
+ if(sinkToIndex==sinkFromIndex) then
+    stop 'Both sink indexes cannot be the same'
+ endif
+
+ mFrom=xyzmh_ptmass(4,sinkFromIndex)
+ mTo=xyzmh_ptmass(4,sinkToIndex)
+ vFrom=vxyz_ptmass(1:3,sinkFromIndex)
+ vTo=vxyz_ptmass(1:3,sinkToIndex)
+
+ mCombined=mFrom+mTo
+ vCombined=(1.0/mCombined)*((mFrom*vFrom)+(mTo*vTo))
+
+ xyzmh_ptmass(4,sinkToIndex)=mCombined
+ vxyz_ptmass(1:3,sinkToIndex)=vCombined
+ 
+ write(*,'(a,I2,a,es10.3,a,es10.3)') 'Mass of sink #',sinkToIndex,' changed from ',mTo,' to ',mCombined
+ write(*,"(a,I2,a,2(es10.3,', '),es10.3,a,2(es10.3,', '),es10.3,a)") 'Velocity of sink #',sinkToIndex,&
+                                                                     ' changed from (',vTo,') to (',&
+                                                                     vCombined,')'
+ 
+
+
+ !sinkFrom will be removed if desired, if not its mass will be set to a very small number.
+ print *,""
+ call prompt('Choose whether to remove the sink that was being merged into another sink (if not, its mass will changed to 1.0E-30)'&
+            ,removeSinkFrom)
+ 
+ if(removeSinkFrom) then
+  call removeSink(sinkFromIndex,xyzmh_ptmass,vxyz_ptmass)
+ else
+  xyzmh_ptmass(4,sinkFromIndex)=1.0E-30
+  write(*,'(a,I2,a)') 'Sink #',sinkFromIndex,' now has a mass of 1.0E-30'
+ endif
+
+
+end subroutine mergeSinks
+ 
 end module moddump
